@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"github.com/codahale/hdrhistogram"
 	"github.com/orbs-network/orbs-network-go/instrumentation/metric"
 	"github.com/orbs-network/orbs-network-go/services/blockstorage/adapter/filesystem"
 	"github.com/orbs-network/orbs-spec/types/go/primitives"
 	"github.com/orbs-network/orbs-spec/types/go/protocol"
 	"github.com/orbs-network/scribe/log"
+	"io/ioutil"
 	"os"
 	"time"
 )
@@ -34,8 +37,10 @@ func (l *localConfig) NetworkType() protocol.SignerNetworkType {
 }
 
 type row struct {
-	blockHeight primitives.BlockHeight
-	txCount     uint64
+	timestamp                  primitives.TimestampNano
+	blockHeight                primitives.BlockHeight
+	txCount                    uint64
+	medianBlockClosingTimeInMs uint64
 }
 
 func main() {
@@ -65,31 +70,55 @@ func main() {
 
 	var rows []row
 
+	var previousBlock *protocol.BlockPairContainer
 	if err := persistence.ScanBlocks(1, 1000, func(first primitives.BlockHeight, page []*protocol.BlockPairContainer) (wantsMore bool) {
 		totalTxCount := uint64(0)
+
+		blockClosingTime := hdrhistogram.NewWindowed(1, 0, 24*time.Hour.Nanoseconds(), 1)
 
 		for _, block := range page {
 			txs := block.TransactionsBlock.SignedTransactions
 			totalTxCount += uint64(len(txs))
+
+			if previousBlock != nil {
+				previousTimestamp := previousBlock.TransactionsBlock.Header.Timestamp()
+				blockClosingTime.Current.RecordValue(int64(block.TransactionsBlock.Header.Timestamp()-previousTimestamp) / 1000000)
+			}
+
+			previousBlock = block
 		}
 
-		lastBatchHeight := page[len(page)-1].TransactionsBlock.Header.BlockHeight()
-		logger.Info(fmt.Sprintf("processed %d/%d", lastBatchHeight, lastBlockHeight))
+		lastBatchBlock := page[len(page)-1]
+		lastBatchBlockHeight := lastBatchBlock.TransactionsBlock.Header.BlockHeight()
+		logger.Info(fmt.Sprintf("processed %d/%d", lastBatchBlockHeight, lastBlockHeight))
 
 		rows = append(rows, row{
-			blockHeight: lastBatchHeight,
-			txCount:     totalTxCount,
+			timestamp:                  lastBatchBlock.TransactionsBlock.Header.Timestamp(),
+			blockHeight:                lastBatchBlockHeight,
+			txCount:                    totalTxCount,
+			medianBlockClosingTimeInMs: uint64(blockClosingTime.Current.Mean()),
 		})
 
-		return lastBatchHeight < 100000
+		//return lastBatchBlockHeight < 100000
 
-		return lastBatchHeight < lastBlockHeight
+		return lastBatchBlockHeight < lastBlockHeight
 	}); err != nil {
 		logger.Error("failed to process things", log.Error(err))
 		os.Exit(1)
 	}
 
+	results := bytes.NewBufferString("")
+	results.WriteString("timestamp,blockHeight,txCount,medianBlockClosingTime\n")
 	for _, row := range rows {
-		fmt.Println(fmt.Sprintf("%d,%d", row.blockHeight, row.txCount))
+		results.WriteString(fmt.Sprintf("%s,%d,%d,%d\n",
+			time.Unix(0, int64(row.timestamp)).Format(time.RFC3339),
+			row.blockHeight, row.txCount, row.medianBlockClosingTimeInMs))
+	}
+
+	if err := ioutil.WriteFile("out.csv", results.Bytes(), 0644); err != nil {
+		logger.Error("could not write file", log.Error(err))
+		os.Exit(1)
+	} else {
+		logger.Info("success")
 	}
 }
