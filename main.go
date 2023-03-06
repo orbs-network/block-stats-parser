@@ -11,6 +11,7 @@ import (
 	"github.com/orbs-network/scribe/log"
 	"io/ioutil"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -47,12 +48,30 @@ func main() {
 	logger := log.GetLogger().WithOutput(log.NewFormattingOutput(os.Stdout, log.NewHumanReadableFormatter()))
 	metricFactory := metric.NewRegistry()
 
+	args := os.Args
+
+	if len(args) < 2 {
+
+		logger.Error("ERROR: command must include [path], [vchain id]\n")
+
+		os.Exit(0)
+
+	}
+
 	start := time.Now()
 
+	vchainIdString := args[2]
+	vchainId, _ := strconv.ParseUint(vchainIdString, 10, 32)
+
+	path := args[1]
+
+	logger.Info("vchainid: " + vchainIdString)
+	logger.Info("path: " + path)
+
 	persistence, err := filesystem.NewBlockPersistence(&localConfig{
-		chainId:     1100000,
+		chainId:     primitives.VirtualChainId(vchainId),
 		networkType: protocol.NETWORK_TYPE_RESERVED,
-		dir:         "/Users/kirill/Downloads",
+		dir:         path,
 	}, logger, metricFactory)
 
 	logger.Info("startup time", log.String("duration", time.Since(start).String()))
